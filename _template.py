@@ -36,12 +36,12 @@ file_formatter = logging.Formatter(
 file_handler.setFormatter(file_formatter)
 
 console_handler = RichHandler(rich_tracebacks=True)
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 
-logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
+logging.basicConfig(level=logging.INFO, handlers=[console_handler, file_handler])
 
 LOGGER = logging.getLogger(_get_project_name())
-LOGGER.debug("Logger initialized.")
+LOGGER.info("Logger initialized.")
 
 
 def check_pyproject(path: Path = Path("./pyproject.toml")):
@@ -71,7 +71,7 @@ def check_pyproject(path: Path = Path("./pyproject.toml")):
 
 @atexit.register
 def at_exit_cleanup():
-    LOGGER.debug("Running at_exit cleanup.")
+    LOGGER.info("Running at_exit cleanup.")
     try:
         os.rmdir(TMPDIR)
     except Exception as e:
