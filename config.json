@@ -5,7 +5,7 @@
     "background_color": "#111111",
     "mirror_bars": true,
     "gradient": true,
-    "gradient_premaide": false,
+    "gradient_premaide": true,
     "gradient_start": "#FF6B35",
     "gradient_end": "#F7931E",
     "gradients": {
@@ -48,6 +48,19 @@
         "sponsor",
         "advertisement",
         "mehr infos",
-        "infos"
+        "infos",
+        "spotify",
+        "premium",
+        "upgrade",
+        "subscribe",
+        "go premium",
+        "listen ad-free",
+        "ad-free",
+        "skip ads",
+        "get premium",
+        "try premium",
+        "werde auch jetzt teil unseres teams",  
+        "teil unseres teams",
+        "werde auch"
     ]
 }

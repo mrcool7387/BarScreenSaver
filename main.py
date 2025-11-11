@@ -185,9 +185,14 @@ def get_media_info():
 # -----------------------
 # GUI
 # -----------------------
-class Visualizer(ctk.CTk):
+class Visualizer(ctk.CTk):    
     def __init__(self, audio_queue):
+        # Fullscreen state and binding
+        self.is_fullscreen = False
         super().__init__()
+        self.bind_all("<F11>", self.toggle_fullscreen)
+        self.bind_all("<F6>", self.force_mute)
+        self.bind_all("<F7>", self.force_unmute)
         ctk.set_appearance_mode("dark")
         self.audio_queue = audio_queue
         self.bars = np.zeros(BAR_COUNT)
@@ -269,16 +274,46 @@ class Visualizer(ctk.CTk):
         )
         self.ad_indicator_window = None
 
+        # Timer label in bottom right corner (same place as ad indicator)
+        self.timer_label = ctk.CTkLabel(
+            self.canvas,
+            text="📰 ??:??",
+            font=("Segoe UI", 20, "bold"),
+            bg_color=BG_COLOR,
+            text_color="#44FF44",
+        )
+        self.timer_label_window = None
+        self.timer_running = False
+        self.timer_end_time = None
+        self.timer_last_state = None  # None, 'ad', 'timer', 'blank'
+
         l.debug("Visualizer: UI initialized")
 
         self.update_ui()
         self.update_visuals()
 
-        # Check if gradient premade is enabled
-        if CONFIG.get('gradient_premaide', False) and CONFIG.get('gradient', False):
-            # Ask for gradient selection
-            gradient_choice = ctk.CTkOptionMenu(self, options=['spring', 'summer', 'autumn', 'winter'], command=self.apply_gradient)
-            gradient_choice.pack()  # Add to the GUI layout
+    def toggle_fullscreen(self, event=None):
+        self.is_fullscreen = not self.is_fullscreen
+        self.attributes("-fullscreen", self.is_fullscreen)
+        # Optionally, escape exits fullscreen
+        if self.is_fullscreen:
+            self.bind_all("<Escape>", self.exit_fullscreen)
+        else:
+            self.unbind_all("<Escape>")
+
+    def exit_fullscreen(self, event=None):
+        self.is_fullscreen = False
+        self.attributes("-fullscreen", False)
+        self.unbind_all("<Escape>")
+
+
+    def force_mute(self, event=None):
+        mute_all_audio(muted=True)
+        l.info("Force mute triggered (F6)")
+
+    def force_unmute(self, event=None):
+        mute_all_audio(muted=False)
+        l.info("Force unmute triggered (F7)")
 
     def reload_config(self, event=None):
         """Reload configuration from config.json and rebuild the UI accordingly.
@@ -379,34 +414,115 @@ class Visualizer(ctk.CTk):
         if SHOW_CLOCK and time_lbl is not None:
             time_lbl.configure(text=datetime.now().strftime("%d.%m.%Y   %H:%M:%S"))
         title, artist, desc = get_media_info()
-        
+
         # Check if current media is an advertisement
         is_currently_ad = is_advertisement(title) or is_advertisement(artist) or is_advertisement(desc)
-        
-        # Handle muting/unmuting
-        if is_currently_ad and not self.is_ad_playing:
-            l.info(f"Advertisement detected: title='{title}' artist='{artist}'")
-            mute_all_audio(muted=True)
-            self.is_ad_playing = True
-            # Show ad indicator
-            if self.ad_indicator_window is None:
-                width = self.winfo_width() or 800
-                height = self.winfo_height() or 600
-                self.ad_indicator_window = self.canvas.create_window(
-                    width - 50, height - 30, window=self.ad_indicator, anchor="se", tags="ad_indicator"
-                )
-        elif not is_currently_ad and self.is_ad_playing:
-            l.info("Advertisement ended, unmuting audio")
-            mute_all_audio(muted=False)
-            self.is_ad_playing = False
-            # Hide ad indicator
+
+        # --- TIMER/AD LOGIC ---
+        width = self.winfo_width() or 800
+        height = self.winfo_height() or 600
+
+        # At program start, no timer or ad indicator
+        if self.timer_last_state is None:
+            # Hide both at start
             if self.ad_indicator_window is not None:
                 try:
                     self.canvas.delete(self.ad_indicator_window)
                 except Exception:
                     pass
                 self.ad_indicator_window = None
-        
+            if self.timer_label_window is not None:
+                try:
+                    self.canvas.delete(self.timer_label_window)
+                except Exception:
+                    pass
+                self.timer_label_window = None
+            self.timer_label.configure(text="📰 ??:??")
+            self.timer_running = False
+            self.timer_end_time = None
+            self.timer_last_state = 'blank'
+
+        # Handle muting/unmuting and ad/timer display
+        if is_currently_ad:
+            # If ad starts, show ad indicator, hide timer, and reset/hold timer
+            if not self.is_ad_playing:
+                l.info(f"Advertisement detected: title='{title}' artist='{artist}'")
+                mute_all_audio(muted=True)
+                self.is_ad_playing = True
+                # Reset and hold timer
+                self.timer_running = False
+                self.timer_end_time = time.time() + 30 * 60  # Reset timer to 30:00
+                self.timer_label.configure(text="📰 ??:??")
+            # Show ad indicator
+            if self.ad_indicator_window is None:
+                self.ad_indicator_window = self.canvas.create_window(
+                    width - 50, height - 30, window=self.ad_indicator, anchor="se", tags="ad_indicator"
+                )
+            # Hide timer label if visible
+            if self.timer_label_window is not None:
+                try:
+                    self.canvas.delete(self.timer_label_window)
+                except Exception:
+                    pass
+                self.timer_label_window = None
+            self.timer_last_state = 'ad'
+        else:
+            # If ad just ended
+            if self.is_ad_playing:
+                l.info("Advertisement ended, unmuting audio")
+                mute_all_audio(muted=False)
+                self.is_ad_playing = False
+                # Hide ad indicator
+                if self.ad_indicator_window is not None:
+                    try:
+                        self.canvas.delete(self.ad_indicator_window)
+                    except Exception:
+                        pass
+                    self.ad_indicator_window = None
+                # Start/resume timer
+                self.timer_running = True
+                # self.timer_end_time is already set to 30:00 from last ad trigger
+                self.timer_label.configure(text="30:00")
+                if self.timer_label_window is None:
+                    self.timer_label_window = self.canvas.create_window(
+                        width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
+                    )
+                self.timer_last_state = 'timer'
+            elif self.timer_running:
+                # Timer is running, update display
+                remaining = int(self.timer_end_time - time.time()) if self.timer_end_time else 0
+                if remaining > 0:
+                    mins = remaining // 60
+                    secs = remaining % 60
+                    self.timer_label.configure(text=f"📰 {mins:02d}:{secs:02d}")
+                    if self.timer_label_window is None:
+                        self.timer_label_window = self.canvas.create_window(
+                            width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
+                        )
+                    self.timer_last_state = 'timer'
+                else:
+                    # Timer finished, show ??
+                    self.timer_label.configure(text="📰 ??:??")
+                    self.timer_running = False
+                    self.timer_end_time = None
+                    self.timer_last_state = 'blank'
+                    if self.timer_label_window is not None:
+                        try:
+                            self.canvas.delete(self.timer_label_window)
+                        except Exception:
+                            pass
+                        self.timer_label_window = None
+            else:
+                # Not ad, not timer running, show 📰 ??:??
+                self.timer_label.configure(text="📰 ??:??")
+                if self.timer_label_window is not None:
+                    try:
+                        self.canvas.delete(self.timer_label_window)
+                    except Exception:
+                        pass
+                    self.timer_label_window = None
+                self.timer_last_state = 'blank'
+
         # Log changes only
         if title != self.current_title or artist != self.current_artist:
             l.info(
@@ -508,6 +624,9 @@ class Visualizer(ctk.CTk):
         # Reposition ad indicator to bottom right
         if self.ad_indicator_window is not None and self.is_ad_playing:
             self.canvas.coords(self.ad_indicator_window, event.width - 50, event.height - 30)
+        # Reposition timer label to bottom right
+        if self.timer_label_window is not None and (self.timer_running or self.timer_label.cget("text") != "📰 ??:??"):
+            self.canvas.coords(self.timer_label_window, event.width - 50, event.height - 30)
 
     def update_visuals(self):
         while not self.audio_queue.empty():
@@ -519,18 +638,13 @@ class Visualizer(ctk.CTk):
         self.after(int(1000 / FPS), self.update_visuals)
 
     # Function to apply selected gradient
-    def apply_gradient(self, selected_gradient):
-        global GRADIENT_START, GRADIENT_END
-        GRADIENT_START = CONFIG['gradients'][selected_gradient][0]
-        GRADIENT_END = CONFIG['gradients'][selected_gradient][1]
-        l.info(f"Gradient applied: {selected_gradient}")
-
-
 if __name__ == "__main__":
-    # Ask the user for an optional PID to restrict media-title lookup.
+    # Create a temporary root window for dialogs
     try:
         root = ctk.CTk()
         root.withdraw()
+        
+        # Ask the user for an optional PID to restrict media-title lookup
         pid_input = tkinter.simpledialog.askstring(
             "Media PID Filter",
             "Enter PID to restrict media lookup (leave blank to scan all):",
@@ -538,9 +652,63 @@ if __name__ == "__main__":
         )
         if pid_input is None:
             pid_input = ""
+            
+        l.info(f"Main: PID input received: '{pid_input}'")
+        
+        # Destroy the first root window
         root.destroy()
+        
+        # Ask for gradient selection if gradient is enabled
+        if CONFIG.get('gradient_premaide', False) and CONFIG.get('gradient', False):
+            l.info("Main: prompting for gradient selection")
+            gradients = CONFIG.get("gradients", {})
+            gradient_list = list(gradients.keys())
+            if gradient_list:
+                # Create a new root window for gradient selection
+                from tkinter import simpledialog
+                root = ctk.CTk()
+                root.title("Gradient Selection")
+                root.geometry("300x150")
+                
+                # Center window on screen
+                root.update_idletasks()
+                screen_width = root.winfo_screenwidth()
+                screen_height = root.winfo_screenheight()
+                x = (screen_width - 300) // 2
+                y = (screen_height - 150) // 2
+                root.geometry(f"300x150+{x}+{y}")
+                
+                # Create label
+                label = ctk.CTkLabel(root, text="Select a gradient:", font=("Segoe UI", 14))
+                label.pack(pady=10)
+                
+                # Create option menu
+                selected_gradient = ctk.CTkOptionMenu(
+                    root,
+                    values=gradient_list,
+                    width=200
+                )
+                selected_gradient.pack(pady=10)
+                selected_gradient.set(gradient_list[0])  # Set default
+                
+                # Create confirm button
+                def on_confirm():
+                    root.quit()
+                
+                confirm_btn = ctk.CTkButton(root, text="Confirm", command=on_confirm)
+                confirm_btn.pack(pady=10)
+                
+                root.mainloop()
+                
+                chosen = selected_gradient.get()
+                GRADIENT_START = gradients[chosen][0]
+                GRADIENT_END = gradients[chosen][1]
+                l.info(f"Main: gradient selected: {chosen} ({GRADIENT_START} -> {GRADIENT_END})")
+                
+                root.destroy()
     except Exception as e:
-        l.debug(f"Main: input() failed or no console available: {e}")
+        l.debug(f"Main: dialog setup failed: {e}")
+        l.exception(f"Main: full exception: {e}")
         pid_input = ""
 
     if pid_input:
