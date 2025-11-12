@@ -1,13 +1,14 @@
 {
     "bar_count": 100,
-    "smoothing": 0.6,
+    "smoothing": 0.8,
     "bar_color": "#FFA500",
     "background_color": "#111111",
     "mirror_bars": true,
     "gradient": true,
     "gradient_premaide": true,
-    "gradient_start": "#FF6B35",
-    "gradient_end": "#F7931E",
+    "gradient_slices": 8,
+    "gradient_start": "#A00000",
+    "gradient_end": "#0000FF",
     "gradients": {
         "spring": ["#FFB347", "#87CEEB"],
         "summer": ["#FFD700", "#FF6347"],
@@ -33,7 +34,10 @@
         "simple_orange": ["#FFA500", "#FFD580"],
         "simple_purple": ["#800080", "#DDA0DD"],
         "simple_brown": ["#A52A2A", "#D2B48C"],
-        "simple_gray": ["#808080", "#D3D3D3"]
+        "simple_gray": ["#808080", "#D3D3D3"],
+
+        "red_blue": ["#A00000", "#0000FF"],
+        "red_purpleblue": ["#FF0000", "#3C0080"]
     },
     "update_rate": 60,
     "show_clock": true,
@@ -62,6 +66,7 @@
         "werde auch jetzt teil unseres teams",  
         "teil unseres teams",
         "werde auch",
-        "Alles über den Superschrott"
+        "Alles über den Superschrott",
+        "Tchibo"
     ]
 }
