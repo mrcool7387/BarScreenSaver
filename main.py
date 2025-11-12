@@ -44,12 +44,12 @@ MIRROR = CONFIG.get("mirror_bars", True)
 FPS = CONFIG.get("update_rate", 30)
 SHOW_CLOCK = CONFIG.get("show_clock", True)
 SMOOTHING = CONFIG.get("smoothing", 0.6)
-# Gradient config: when true, bars are rendered with a left->right gradient
 GRADIENT = CONFIG.get("gradient", False)
 GRADIENT_START = CONFIG.get("gradient_start", BAR_COLOR)
 GRADIENT_END = CONFIG.get("gradient_end", BAR_COLOR)
-# Number of vertical slices per bar to approximate a horizontal gradient
 GRADIENT_SLICES = CONFIG.get("gradient_slices", 8)
+DYNAMIC_GRADIENT = CONFIG.get("gradient_dynamic", False)
+GRADIENT_SPEED = CONFIG.get("gradient_speed", 2.0)
 
 # Optional: restrict media-title lookup to a specific process id (pid)
 SELECT_PID = None
@@ -273,6 +273,15 @@ class Visualizer(ctk.CTk):
             text_color="#FF4444",
         )
         self.ad_indicator_window = None
+        
+        self.muted_indicator = ctk.CTkLabel(
+            self.canvas,
+            text="🔇 MUTED",
+            font=("Segoe UI", 20, "bold"),
+            bg_color=BG_COLOR,
+            text_color="#FF4444",
+        )
+        self.muted_indicator_window = None
 
         # Timer label in bottom right corner (same place as ad indicator)
         self.timer_label = ctk.CTkLabel(
@@ -306,14 +315,27 @@ class Visualizer(ctk.CTk):
         self.attributes("-fullscreen", False)
         self.unbind_all("<Escape>")
 
-
     def force_mute(self, event=None):
         mute_all_audio(muted=True)
         l.info("Force mute triggered (F6)")
+        # Zeige Muted Indicator
+        if self.muted_indicator_window is None:
+            width = self.winfo_width() or 800
+            height = self.winfo_height() or 600
+            self.muted_indicator_window = self.canvas.create_window(
+                width - 50, height - 110, window=self.muted_indicator, anchor="se", tags="muted_indicator"
+            )
 
     def force_unmute(self, event=None):
         mute_all_audio(muted=False)
         l.info("Force unmute triggered (F7)")
+        # Verstecke Muted Indicator
+        if self.muted_indicator_window is not None:
+            try:
+                self.canvas.delete(self.muted_indicator_window)
+            except Exception:
+                pass
+            self.muted_indicator_window = None
 
     def reload_config(self, event=None):
         """Reload configuration from config.json and rebuild the UI accordingly.
@@ -324,6 +346,8 @@ class Visualizer(ctk.CTk):
         """
         global CONFIG, BAR_COUNT, BAR_COLOR, BG_COLOR, MIRROR, FPS, SHOW_CLOCK
         global GRADIENT, GRADIENT_START, GRADIENT_END, GRADIENT_SLICES
+        global DYNAMIC_GRADIENT, GRADIENT_SPEED
+        
         try:
             l.info("reload_config: reloading config.json")
             with open("config.json", "r") as f:
@@ -340,6 +364,8 @@ class Visualizer(ctk.CTk):
             GRADIENT_START = CONFIG.get("gradient_start", GRADIENT_START)
             GRADIENT_END = CONFIG.get("gradient_end", GRADIENT_END)
             GRADIENT_SLICES = CONFIG.get("gradient_slices", GRADIENT_SLICES)
+            GRADIENT_SPEED = CONFIG.get("gradient_speed", GRADIENT_SPEED)
+            DYNAMIC_GRADIENT = CONFIG.get("gradient_dynamic", DYNAMIC_GRADIENT)
 
             l.info(f"reload_config: new config={CONFIG}")
 
@@ -536,12 +562,11 @@ class Visualizer(ctk.CTk):
         self.after(500, self.update_ui)
 
     def draw_bars(self, spectrum):
-        # Update existing rectangle coords instead of deleting/creating them each frame.
-        width = self.winfo_width()
+        width = self.winfo_width()    
         height = self.winfo_height()
         mid = height // 2
         bar_w = width / (BAR_COUNT * 1.5)
-        # Ensure we have items created (first configure event should create them)
+
         if not self.bar_items:
             self._init_bars()
 
@@ -551,19 +576,39 @@ class Visualizer(ctk.CTk):
             x = i * bar_w * 1.5 + bar_w
             x1, y1, x2, y2 = x, mid - h, x + bar_w, mid
             try:
-                # In gradient mode each bar has its own stepped color but is still a single rectangle
                 self.canvas.coords(self.bar_items[i], x1, y1, x2, y2)
             except Exception:
-                # If something unexpected happened (e.g., items not initialized), skip
                 continue
             if MIRROR:
                 try:
                     self.canvas.coords(self.mirror_items[i], x1, mid, x2, mid + h)
                 except Exception:
                     continue
+    
+    @staticmethod
+    def shift_color(color, shift, start_color, stop_color, max_shift=25):
+        """Shift a hex color based on sine wave, bounded by start/stop colors."""
+        if not GRADIENT and not DYNAMIC_GRADIENT: 
+            return color
+        h = color.lstrip('#')
+        rgb = [int(h[i:i+2], 16) for i in (0, 2, 4)]
 
-        # Keep tag for possible future operations
-        # Note: avoid per-frame logging here to prevent slowdown
+        # Parse start and stop colors properly
+        start_h = start_color.lstrip('#')
+        stop_h = stop_color.lstrip('#')
+        start_rgb = [int(start_h[i:i+2], 16) for i in (0, 2, 4)]
+        stop_rgb = [int(stop_h[i:i+2], 16) for i in (0, 2, 4)]
+
+        new_rgb = []
+        for j, c in enumerate(rgb):
+            # Apply sine-based shift
+            delta = int(max_shift * math.sin(shift + j))
+            val = c + delta
+            # Clamp to valid RGB range [0, 255]
+            val = max(0, min(255, val))
+            new_rgb.append(val)
+        
+        return '#{:02X}{:02X}{:02X}'.format(*new_rgb)
 
 
     def _init_bars(self):
@@ -596,18 +641,19 @@ class Visualizer(ctk.CTk):
         for i in range(BAR_COUNT):
             x = i * bar_w * 1.5 + bar_w
             # start with zero height rectangles centered at mid
-            if GRADIENT:
-                # compute stepped color for this bar across the full bar span
-                t = i / max(1, BAR_COUNT - 1)
-                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
-                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
-                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
-                color = rgb_to_hex(r, g, b)
-                rect = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=color, width=0, tags="bars")
-                self.bar_items.append(rect)
-                if MIRROR:
-                    rect2 = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=color, width=0, tags="bars")
-                    self.mirror_items.append(rect2)
+        for i in range(BAR_COUNT):
+            x = i * bar_w * 1.5 + bar_w                
+            t = i / max(1, BAR_COUNT - 1)
+            r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
+            g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
+            b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
+            color = rgb_to_hex(r, g, b)
+            rect = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=color, width=0, tags="bars")
+            self.bar_items.append(rect)
+            
+            if MIRROR:
+                rect2 = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=color, width=0, tags="bars")
+                self.mirror_items.append(rect2)
             else:
                 rect = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=BAR_COLOR, width=0, tags="bars")
                 self.bar_items.append(rect)
