@@ -66,11 +66,13 @@ l.info(f"Configuration loaded: {CONFIG}")
 # 🛠️ SPOTIFY/GEMINI CONFIGURATION
 # ---------------------------------------------------------
 # NOTE: Replace these with your actual credentials
-CLIENT_ID = "c34e289a8831477cbd8d47458e583afc"
-CLIENT_SECRET = "4daed514ad234bdfac9b5be783df701e"
+CLIENT_ID = "SPOTIFY_APP_CLIENT_ID"
+CLIENT_SECRET = "SPOTIFY_APP_CLIENT_SECRET"
 REDIRECT_URI = "http://127.0.0.1:8080/callback"
-# [REMOVED] # GEMINI_API_KEY = "AIzaSyCBPhjq4tkApXgKkmao9HQ0Q-dQhqYxn0I"
 TOKEN_FILE = "spotify_token.json"
+
+assert CLIENT_ID != "SPOTIFY_APP_CLIENT_ID", "Please set your Spotify App Client ID in Line 69:13."
+assert CLIENT_SECRET != "SPOTIFY_APP_CLIENT_SECRET", "Please set your Spotify App Client Secret in Line 70:17."
 
 # Scope updated to include 'user-read-recently-played' to access playback history
 SCOPES = "user-read-currently-playing user-read-recently-played"
