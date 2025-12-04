@@ -1,21 +1,24 @@
-import ctypes
 import json
 import math
 import os
 import queue
 import threading
 import time
-import tkinter.simpledialog
 from ctypes import windll
 from datetime import datetime
 
 import comtypes
 import customtkinter as ctk
 import numpy as np
-import win32con
-import win32gui
-import win32process
+# Removed windows-specific imports: win32con, win32gui, win32process
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation, ISimpleAudioVolume
+
+# New imports for Spotify logic
+import http.server
+import socketserver
+import requests
+import webbrowser
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import _template
 
@@ -52,22 +55,277 @@ DYNAMIC_GRADIENT = CONFIG.get("gradient_dynamic", False)
 GRADIENT_SPEED = CONFIG.get("gradient_speed", 2.0)
 
 # Optional: restrict media-title lookup to a specific process id (pid)
+# SELECT_PID is now obsolete
 SELECT_PID = None
 
 l = _template.LOGGER
 l.info(f"Configuration loaded: {CONFIG}")
 
-# -----------------------
-# Advertisement detection keywords
-# -----------------------
-AD_KEYWORDS = CONFIG.get("ad_keywords", [])
 
-def is_advertisement(text):
-    """Check if text contains advertisement keywords (case-insensitive)."""
-    if not text:
-        return False
-    text_lower = str(text).lower().strip()
-    return any(keyword in text_lower for keyword in AD_KEYWORDS)
+# ---------------------------------------------------------
+# 🛠️ SPOTIFY/GEMINI CONFIGURATION
+# ---------------------------------------------------------
+# NOTE: Replace these with your actual credentials
+CLIENT_ID = "c34e289a8831477cbd8d47458e583afc"
+CLIENT_SECRET = "4daed514ad234bdfac9b5be783df701e"
+REDIRECT_URI = "http://127.0.0.1:8080/callback"
+# [REMOVED] # GEMINI_API_KEY = "AIzaSyCBPhjq4tkApXgKkmao9HQ0Q-dQhqYxn0I"
+TOKEN_FILE = "spotify_token.json"
+
+# Scope updated to include 'user-read-recently-played' to access playback history
+SCOPES = "user-read-currently-playing user-read-recently-played"
+
+# Spotify API base URLs (using placeholders for security)
+SPOTIFY_AUTH_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_NOW_PLAYING_URL = "https://api.spotify.com/v1/me/player/currently-playing"
+SPOTIFY_RECENTLY_PLAYED_URL = "https://api.spotify.com/v1/me/player/recently-played"
+SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
+
+# ---------------------------------------------------------
+# 💾 Token Handling
+# ---------------------------------------------------------
+def save_tokens(data):
+    """Saves the Spotify access and refresh tokens to a file."""
+    l.debug("Saving Spotify tokens to file.")
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+def load_tokens():
+    """Loads existing Spotify tokens from the file."""
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            l.debug("Loading tokens from file.")
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        l.info("No token file found or file is invalid.")
+        return None
+
+# ---------------------------------------------------------
+# 🔒 OAuth Flow and Server
+# ---------------------------------------------------------
+auth_code = None
+
+class OAuthHandler(http.server.SimpleHTTPRequestHandler):
+    """Handles the temporary local server to capture the OAuth callback."""
+    def do_GET(self):
+        global auth_code
+        parsed_url = urlparse(self.path)
+        
+        if parsed_url.path == "/callback":
+            query_params = parse_qs(parsed_url.query)
+            if "code" in query_params:
+                auth_code = query_params["code"][0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                msg = "Spotify login successful! You can close this window."
+                self.wfile.write(msg.encode("utf-8"))
+                l.info("Authorization code received and server closed.")
+                return
+        
+        self.send_error(404)
+
+def start_auth_server():
+    """Starts a temporary HTTP server to capture the authorization code."""
+    with socketserver.TCPServer(("127.0.0.1", 8080), OAuthHandler) as httpd:
+        l.debug("Temporary HTTP server started on 127.0.0.1:8080.")
+        # Only handle one request (the callback) and then shut down
+        httpd.handle_request()
+
+def initiate_auth_flow():
+    """Starts the full authorization process."""
+    l.info("Starting Spotify login...")
+    
+    # 1. Start the local server in a separate thread
+    t = threading.Thread(target=start_auth_server)
+    t.daemon = True
+    t.start()
+    
+    # 2. Build and open the authorization URL
+    params = {
+        "client_id": CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": SCOPES
+    }
+    auth_url = f"{SPOTIFY_AUTHORIZE_URL}?{urlencode(params)}"
+    webbrowser.open(auth_url)
+    
+    l.info("Please log in and grant access in the browser...")
+    
+    # 3. Wait for the authorization code
+    global auth_code
+    while auth_code is None:
+        time.sleep(0.3)
+        
+    # 4. Exchange the code for tokens
+    l.info("Exchanging authorization code for tokens.")
+    tokens = get_tokens_from_code(auth_code)
+    save_tokens(tokens)
+    return tokens
+
+def get_tokens_from_code(code):
+    """Exchanges the authorization code for access and refresh tokens."""
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+    r = requests.post(SPOTIFY_AUTH_URL, data=data)
+    r.raise_for_status()
+    l.debug("Successfully exchanged code for tokens.")
+    return r.json()
+
+def refresh_access_token(refresh_token):
+    """Uses the refresh token to get a new access token."""
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+    r = requests.post(SPOTIFY_AUTH_URL, data=data)
+    r.raise_for_status()
+    l.info("Access token successfully refreshed.")
+    return r.json()
+
+# ---------------------------------------------------------
+# 🎧 Spotify API Call Functions
+# ---------------------------------------------------------
+def get_current_playing(access_token):
+    """Fetches the currently playing track."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    r = requests.get(SPOTIFY_NOW_PLAYING_URL, headers=headers)
+    
+    # 204 No Content means nothing is currently playing
+    if r.status_code == 204:
+        l.debug("API Status: 204 No Content. Nothing is currently playing.")
+        return None
+    if r.status_code != 200:
+        r.raise_for_status() # Raise error for other non-200 codes
+        
+    data = r.json()
+    if not data.get("is_playing", False):
+        l.debug("API Status: 200 OK, but 'is_playing' is false.")
+        return None
+        
+    item = data.get("item")
+    # We only care about tracks for the visualizer title
+    if not item or item.get("type") != "track" or not item.get("artists"):
+        l.debug("API Status: Current item is not a track (e.g., episode, context) or missing data.")
+        return None 
+        
+    title = item["name"]
+    artist = item["artists"][0]["name"]
+    l.debug(f"API fetched: {title} by {artist}")
+    return title, artist
+
+# -----------------------
+# Media info (Spotify API)
+# -----------------------
+class SpotifyMediaCapture(threading.Thread):
+    def __init__(self, q: queue.Queue):
+        super().__init__(daemon=True)
+        self.q = q # The queue to send media info (title, artist, is_ad)
+        self.running = True
+        self.tokens = None
+        self.access_token = None
+        self.refresh_token = None
+        self.last_song_checked = None
+
+    def run(self):
+        # --- Authentication Setup ---
+        self.tokens = load_tokens()
+        if not self.tokens:
+            l.info("SpotifyMediaCapture: No tokens found, initiating auth flow.")
+            self.tokens = initiate_auth_flow()
+        else:
+            l.info("SpotifyMediaCapture: Loaded existing tokens.")
+
+        self.access_token = self.tokens["access_token"]
+        self.refresh_token = self.tokens.get("refresh_token")
+        l.info("SpotifyMediaCapture: Start monitoring...")
+        
+        self.auth_setup_complete = True
+        
+        while self.running:
+            try:
+                # 1. Get the current track
+                current_song = get_current_playing(self.access_token)
+                
+                # --- Handle No Song or Token Error ---
+                if current_song is None:
+                    # CLASSIFICATION LOGIC: If no title/artist is available, assume it's an AD/Silence/Interlude.
+                    is_ad = True 
+                    title = "No Title / AD"
+                    artist = "No Playback / AD"
+
+                    # Attempt to refresh the token on any interruption or if nothing is playing
+                    try:
+                        refreshed = refresh_access_token(self.refresh_token)
+                        self.access_token = refreshed["access_token"]
+                        self.tokens["access_token"] = self.access_token
+                        save_tokens(self.tokens)
+                        l.debug("SpotifyMediaCapture: Status: No music active. Token refreshed.")
+                    except Exception:
+                        l.debug("SpotifyMediaCapture: Status: No music active or error during token refresh.")
+                    
+                    # Push default empty/ad state to the queue
+                    if self.last_song_checked != (title, artist):
+                        l.info("[Logic-Check] Classified as ADVERTISEMENT (No track data available).")
+                        self.last_song_checked = (title, artist)
+                    
+                    self.q.put((title, artist, is_ad))
+                    time.sleep(1)
+                    continue
+                    
+                # --- Process Track ---
+                title, artist = current_song
+                # CLASSIFICATION LOGIC: If we have a title/artist, it is a Music Track.
+                is_ad = False 
+                
+                # --- Log New Song ---
+                if self.last_song_checked != (title, artist):
+                    l.info(f"SpotifyMediaCapture: --- NEW TRACK ---: {title} - {artist}")
+                    l.info("[Logic-Check] Classified as Music Track (Title/Artist available).")
+                        
+                    self.last_song_checked = (title, artist)
+                    
+                # Send the latest info to the GUI thread
+                self.q.put((title, artist, is_ad))
+                
+            except requests.HTTPError as e:
+                # Catch 401 Unauthorized or other HTTP errors
+                l.error(f"SpotifyMediaCapture: ❌ HTTP Error ({e.response.status_code}): {e}")
+                if e.response.status_code == 401:
+                    # Token expired/invalid, try refresh immediately
+                    l.warning("SpotifyMediaCapture: Attempting token refresh due to 401...")
+                    try:
+                        refreshed = refresh_access_token(self.refresh_token)
+                        self.access_token = refreshed["access_token"]
+                        self.tokens["access_token"] = self.access_token
+                        save_tokens(self.tokens)
+                        l.info("SpotifyMediaCapture: Token successfully refreshed. Continuing monitoring.")
+                    except Exception as refresh_err:
+                        l.exception(f"SpotifyMediaCapture: Error during token refresh: {refresh_err}. Exiting thread.")
+                        self.q.put(("Token Error", "Re-Auth Required", True)) # Signal error
+                        break # Exit loop if refresh fails
+                
+                self.q.put(("Error", f"HTTP {e.response.status_code}", True))
+                    
+            except Exception as e:
+                l.exception(f"SpotifyMediaCapture: An unexpected error occurred: {e}")
+                self.q.put(("Error", "Unknown Issue", True)) # Signal error
+            
+            # Wait before checking again
+            time.sleep(1) # Check Spotify every 5 seconds
+        
+        l.info("SpotifyMediaCapture: thread exiting")
+            
+    def stop(self):
+        self.running = False
 
 
 # -----------------------
@@ -136,57 +394,10 @@ class AudioCapture(threading.Thread):
 
 
 # -----------------------
-# Media info (Fenster-Titel)
-# -----------------------
-def get_media_info():
-    titles = []
-
-    def enum_handler(hwnd, _):
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            try:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            except Exception:
-                pid = None
-
-            # If a specific PID is selected, prefer windows owned by that PID.
-            if SELECT_PID is not None:
-                if pid == SELECT_PID and title:
-                    titles.append(title)
-            else:
-                if title and any(
-                    p in title.lower()
-                    for p in ["spotify", "youtube", "vlc", "music", "mpv", "media"]
-                ):
-                    titles.append(title)
-
-    win32gui.EnumWindows(enum_handler, None)
-    l.debug(f"get_media_info: candidate titles={titles} (SELECT_PID={SELECT_PID})")
-
-    if not titles:
-        l.debug("get_media_info: no media window titles found")
-        return "Kein Titel", "Keine Wiedergabe", ""
-
-    title = titles[0]
-    # Many windows use "Artist - Title" or "Title - Artist". Try to be flexible.
-    if " - " in title:
-        parts = title.split(" - ")
-        if len(parts) >= 2:
-            # Heuristic: if the first part contains known artist words (lowercase check), guess format Artist - Title
-            first, second = parts[0].strip(), " - ".join(parts[1:]).strip()
-            l.debug(
-                f"get_media_info: parsed as title/artist -> title='{first}', artist='{second}'"
-            )
-            return first, second, None
-    l.debug(f"get_media_info: returning raw title='{title}'")
-    return title, None, None
-
-
-# -----------------------
 # GUI
 # -----------------------
 class Visualizer(ctk.CTk):    
-    def __init__(self, audio_queue):
+    def __init__(self, audio_queue, media_queue):
         # Fullscreen state and binding
         self.is_fullscreen = False
         super().__init__()
@@ -195,10 +406,12 @@ class Visualizer(ctk.CTk):
         self.bind_all("<F7>", self.force_unmute)
         ctk.set_appearance_mode("dark")
         self.audio_queue = audio_queue
+        self.media_queue = media_queue # New media queue
         self.bars = np.zeros(BAR_COUNT)
         self.target = np.zeros_like(self.bars)
-        self.current_title = None
-        self.current_artist = None
+        self.current_title = "No Title"
+        self.current_artist = "No Playback"
+        self.current_desc = ""
         self.is_ad_playing = False
         # always define time_label attribute to satisfy runtime and static checks
         self.time_label = None
@@ -249,7 +462,7 @@ class Visualizer(ctk.CTk):
             self.time_label.pack()
         self.title_label = ctk.CTkLabel(
             self.info_frame,
-            text="Titel — Artist",
+            text="Title — Artist",
             font=("Segoe UI", 20),
             bg_color=BG_COLOR,
             text_color="#FFFFFF",
@@ -296,7 +509,8 @@ class Visualizer(ctk.CTk):
         self.timer_end_time = None
         self.timer_last_state = None  # None, 'ad', 'timer', 'blank'
 
-        l.debug("Visualizer: UI initialized")
+        l.info("Visualizer: UI initialized")
+        l.info(f"Visualizer: Bar Count: {BAR_COUNT}, FPS: {FPS}, Mirror: {MIRROR}")
 
         self.update_ui()
         self.update_visuals()
@@ -304,6 +518,7 @@ class Visualizer(ctk.CTk):
     def toggle_fullscreen(self, event=None):
         self.is_fullscreen = not self.is_fullscreen
         self.attributes("-fullscreen", self.is_fullscreen)
+        l.info(f"Fullscreen toggled: {self.is_fullscreen}")
         # Optionally, escape exits fullscreen
         if self.is_fullscreen:
             self.bind_all("<Escape>", self.exit_fullscreen)
@@ -314,11 +529,12 @@ class Visualizer(ctk.CTk):
         self.is_fullscreen = False
         self.attributes("-fullscreen", False)
         self.unbind_all("<Escape>")
+        l.info("Exiting fullscreen.")
 
     def force_mute(self, event=None):
         mute_all_audio(muted=True)
-        l.info("Force mute triggered (F6)")
-        # Zeige Muted Indicator
+        l.info("Force mute triggered (F6). Audio muted.")
+        # Show Muted Indicator
         if self.muted_indicator_window is None:
             width = self.winfo_width() or 800
             height = self.winfo_height() or 600
@@ -328,8 +544,8 @@ class Visualizer(ctk.CTk):
 
     def force_unmute(self, event=None):
         mute_all_audio(muted=False)
-        l.info("Force unmute triggered (F7)")
-        # Verstecke Muted Indicator
+        l.info("Force unmute triggered (F7). Audio unmuted.")
+        # Hide Muted Indicator
         if self.muted_indicator_window is not None:
             try:
                 self.canvas.delete(self.muted_indicator_window)
@@ -339,17 +555,13 @@ class Visualizer(ctk.CTk):
 
     def reload_config(self, event=None):
         """Reload configuration from config.json and rebuild the UI accordingly.
-
-        This updates module-level config variables, resizes internal buffers,
-        recreates the bar items, updates colors and clock visibility, and
-        logs any errors. Intended to be called on F8 press.
         """
         global CONFIG, BAR_COUNT, BAR_COLOR, BG_COLOR, MIRROR, FPS, SHOW_CLOCK
         global GRADIENT, GRADIENT_START, GRADIENT_END, GRADIENT_SLICES
         global DYNAMIC_GRADIENT, GRADIENT_SPEED
         
         try:
-            l.info("reload_config: reloading config.json")
+            l.info("Reloading config.json (F8 triggered).")
             with open("config.json", "r") as f:
                 CONFIG = json.load(f)
 
@@ -367,7 +579,7 @@ class Visualizer(ctk.CTk):
             GRADIENT_SPEED = CONFIG.get("gradient_speed", GRADIENT_SPEED)
             DYNAMIC_GRADIENT = CONFIG.get("gradient_dynamic", DYNAMIC_GRADIENT)
 
-            l.info(f"reload_config: new config={CONFIG}")
+            l.info(f"New configuration loaded: Bar Count={BAR_COUNT}, FPS={FPS}, Mirror={MIRROR}")
 
             # Update canvas background
             try:
@@ -430,135 +642,136 @@ class Visualizer(ctk.CTk):
                 except Exception:
                     l.exception("reload_config: fallback _init_bars also failed")
 
-            l.info("reload_config: config reloaded and UI rebuilt")
+            l.info("Config reloaded and UI rebuilt successfully.")
         except Exception as e:
             l.exception(f"reload_config: failed to reload config: {e}")
 
     def update_ui(self):
-        # Only update the clock label if the config requests it and the label exists
+        # 1. Update clock
         time_lbl = getattr(self, "time_label", None)
         if SHOW_CLOCK and time_lbl is not None:
             time_lbl.configure(text=datetime.now().strftime("%d.%m.%Y   %H:%M:%S"))
-        title, artist, desc = get_media_info()
 
-        # Check if current media is an advertisement
-        is_currently_ad = is_advertisement(title) or is_advertisement(artist) or is_advertisement(desc)
-
-        # --- TIMER/AD LOGIC ---
-        width = self.winfo_width() or 800
-        height = self.winfo_height() or 600
-
-        # At program start, no timer or ad indicator
-        if self.timer_last_state is None:
-            # Hide both at start
-            if self.ad_indicator_window is not None:
-                try:
-                    self.canvas.delete(self.ad_indicator_window)
-                except Exception:
-                    pass
-                self.ad_indicator_window = None
-            if self.timer_label_window is not None:
-                try:
-                    self.canvas.delete(self.timer_label_window)
-                except Exception:
-                    pass
-                self.timer_label_window = None
-            self.timer_label.configure(text="📰 ??:??")
-            self.timer_running = False
-            self.timer_end_time = None
-            self.timer_last_state = 'blank'
-
-        # Handle muting/unmuting and ad/timer display
-        if is_currently_ad:
-            # If ad starts, show ad indicator, hide timer, and reset/hold timer
-            if not self.is_ad_playing:
-                l.info(f"Advertisement detected: title='{title}' artist='{artist}'")
-                mute_all_audio(muted=True)
-                self.is_ad_playing = True
-                # Reset and hold timer
-                self.timer_running = False
-                self.timer_end_time = time.time() + 30 * 60  # Reset timer to 30:00
-                self.timer_label.configure(text="📰 ??:??")
-            # Show ad indicator
-            if self.ad_indicator_window is None:
-                self.ad_indicator_window = self.canvas.create_window(
-                    width - 50, height - 30, window=self.ad_indicator, anchor="se", tags="ad_indicator"
-                )
-            # Hide timer label if visible
-            if self.timer_label_window is not None:
-                try:
-                    self.canvas.delete(self.timer_label_window)
-                except Exception:
-                    pass
-                self.timer_label_window = None
-            self.timer_last_state = 'ad'
-        else:
-            # If ad just ended
-            if self.is_ad_playing:
-                l.info("Advertisement ended, unmuting audio")
-                mute_all_audio(muted=False)
-                self.is_ad_playing = False
-                # Hide ad indicator
-                if self.ad_indicator_window is not None:
-                    try:
-                        self.canvas.delete(self.ad_indicator_window)
-                    except Exception:
-                        pass
-                    self.ad_indicator_window = None
-                # Start/resume timer
-                self.timer_running = True
-                # self.timer_end_time is already set to 30:00 from last ad trigger
-                self.timer_label.configure(text="30:00")
-                if self.timer_label_window is None:
-                    self.timer_label_window = self.canvas.create_window(
-                        width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
+        # 2. Get latest media info from the media thread queue
+        while not self.media_queue.empty():
+            try:
+                title, artist, is_ad = self.media_queue.get_nowait()
+                # Only update media info if it has changed
+                if title != self.current_title or artist != self.current_artist:
+                    l.info(
+                        f"Visualizer: Media info updated: Title='{title}' Artist='{artist}' Is_Ad={is_ad}"
                     )
-                self.timer_last_state = 'timer'
-            elif self.timer_running:
-                # Timer is running, update display
-                remaining = int(self.timer_end_time - time.time()) if self.timer_end_time else 0
-                if remaining > 0:
-                    mins = remaining // 60
-                    secs = remaining % 60
-                    self.timer_label.configure(text=f"📰 {mins:02d}:{secs:02d}")
-                    if self.timer_label_window is None:
-                        self.timer_label_window = self.canvas.create_window(
-                            width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
-                        )
-                    self.timer_last_state = 'timer'
-                else:
-                    # Timer finished, show ??
-                    self.timer_label.configure(text="📰 ??:??")
+                    self.current_title = title
+                    self.current_artist = artist
+                    # No description is provided by the new logic, set to empty
+                    self.current_desc = "" 
+                
+                # Check if current media is an advertisement
+                is_currently_ad = is_ad
+
+                # --- TIMER/AD LOGIC ---
+                width = self.winfo_width() or 800
+                height = self.winfo_height() or 600
+
+                # At program start, ensure initial state is blank
+                if self.timer_last_state is None:
+                    # Initialize to blank state
+                    self.is_ad_playing = False
                     self.timer_running = False
                     self.timer_end_time = None
+                    self.timer_label.configure(text="📰 ??:??")
                     self.timer_last_state = 'blank'
+                
+                # Handle muting/unmuting and ad/timer display
+                if is_currently_ad:
+                    # If ad starts, show ad indicator, hide timer, and reset/hold timer
+                    if not self.is_ad_playing:
+                        l.info(f"Advertisement detected: Title='{title}' Artist='{artist}'. Muting audio.")
+                        mute_all_audio(muted=True)
+                        self.is_ad_playing = True
+                        # Reset and hold timer
+                        self.timer_running = False
+                        self.timer_end_time = time.time() + 30 * 60  # Reset timer to 30:00
+                        self.timer_label.configure(text="📰 ??:??")
+                    # Show ad indicator
+                    if self.ad_indicator_window is None:
+                        self.ad_indicator_window = self.canvas.create_window(
+                            width - 50, height - 30, window=self.ad_indicator, anchor="se", tags="ad_indicator"
+                        )
+                    # Hide timer label if visible
                     if self.timer_label_window is not None:
                         try:
                             self.canvas.delete(self.timer_label_window)
                         except Exception:
                             pass
                         self.timer_label_window = None
-            else:
-                # Not ad, not timer running, show 📰 ??:??
-                self.timer_label.configure(text="📰 ??:??")
-                if self.timer_label_window is not None:
-                    try:
-                        self.canvas.delete(self.timer_label_window)
-                    except Exception:
-                        pass
-                    self.timer_label_window = None
-                self.timer_last_state = 'blank'
+                    self.timer_last_state = 'ad'
+                else:
+                    # If ad just ended
+                    if self.is_ad_playing:
+                        l.info("Advertisement ended, unmuting audio and starting timer.")
+                        mute_all_audio(muted=False)
+                        self.is_ad_playing = False
+                        # Hide ad indicator
+                        if self.ad_indicator_window is not None:
+                            try:
+                                self.canvas.delete(self.ad_indicator_window)
+                            except Exception:
+                                pass
+                            self.ad_indicator_window = None
+                        # Start/resume timer
+                        self.timer_running = True
+                        # self.timer_end_time is already set to 30:00 from last ad trigger
+                        self.timer_label.configure(text="30:00")
+                        if self.timer_label_window is None:
+                            self.timer_label_window = self.canvas.create_window(
+                                width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
+                            )
+                        self.timer_last_state = 'timer'
+                    elif self.timer_running:
+                        # Timer is running, update display
+                        remaining = int(self.timer_end_time - time.time()) if self.timer_end_time else 0
+                        if remaining > 0:
+                            mins = remaining // 60
+                            secs = remaining % 60
+                            self.timer_label.configure(text=f"📰 {mins:02d}:{secs:02d}")
+                            if self.timer_label_window is None:
+                                self.timer_label_window = self.canvas.create_window(
+                                    width - 50, height - 30, window=self.timer_label, anchor="se", tags="timer_label"
+                                )
+                            self.timer_last_state = 'timer'
+                        else:
+                            # Timer finished, show ??
+                            l.info("Ad timer expired.")
+                            self.timer_label.configure(text="📰 ??:??")
+                            self.timer_running = False
+                            self.timer_end_time = None
+                            self.timer_last_state = 'blank'
+                            if self.timer_label_window is not None:
+                                try:
+                                    self.canvas.delete(self.timer_label_window)
+                                except Exception:
+                                    pass
+                            self.timer_label_window = None
+                    else:
+                        # Not ad, not timer running, show 📰 ??:??
+                        self.timer_label.configure(text="📰 ??:??")
+                        if self.timer_label_window is not None:
+                            try:
+                                self.canvas.delete(self.timer_label_window)
+                            except Exception:
+                                pass
+                        self.timer_label_window = None
+                        self.timer_last_state = 'blank'
 
-        # Log changes only
-        if title != self.current_title or artist != self.current_artist:
-            l.info(
-                f"Visualizer: media changed -> title='{title}' artist='{artist}' desc='{desc}'"
-            )
-            self.current_title = title
-            self.current_artist = artist
+            except queue.Empty:
+                break # break the inner while loop if the queue is empty
 
-        self.title_label.configure(text=f"{title} — {artist}" if artist else title)
-        self.desc_label.configure(text=desc or "")
+        # 3. Update the labels with stored values
+        self.title_label.configure(text=f"{self.current_title} — {self.current_artist}" if self.current_artist else self.current_title)
+        self.desc_label.configure(text=self.current_desc or "")
+        
+        # Reschedule next UI update
         self.after(500, self.update_ui)
 
     def draw_bars(self, spectrum):
@@ -660,9 +873,12 @@ class Visualizer(ctk.CTk):
                 if MIRROR:
                     rect2 = self.canvas.create_rectangle(x, mid, x + bar_w, mid, fill=BAR_COLOR, width=0, tags="bars")
                     self.mirror_items.append(rect2)
+        l.debug(f"Visualizer: Re-initialized {len(self.bar_items)} bar items.")
+
 
     def _on_resize(self, event):
         """Handle canvas resize: recreate items to match new geometry."""
+        l.debug(f"Canvas resized to {event.width}x{event.height}. Rebuilding bars.")
         # Recreate bar items to match new sizes; quick and infrequent (on resize only)
         self._init_bars()
         # Reposition info frame to center it horizontally
@@ -690,23 +906,15 @@ if __name__ == "__main__":
         root = ctk.CTk()
         root.withdraw()
         
-        # Ask the user for an optional PID to restrict media-title lookup
-        pid_input = tkinter.simpledialog.askstring(
-            "Media PID Filter",
-            "Enter PID to restrict media lookup (leave blank to scan all):",
-            parent=root,
-        )
-        if pid_input is None:
-            pid_input = ""
-            
-        l.info(f"Main: PID input received: '{pid_input}'")
+        # The PID input dialog is removed as it's no longer necessary with the Spotify API.
+        l.info("Main: Skipping PID input as Spotify API is used.")
         
         # Destroy the first root window
         root.destroy()
         
         # Ask for gradient selection if gradient is enabled
         if CONFIG.get('gradient_premaide', False) and CONFIG.get('gradient', False):
-            l.info("Main: prompting for gradient selection")
+            l.info("Main: Prompting for gradient selection.")
             gradients = CONFIG.get("gradients", {})
             gradient_list = list(gradients.keys())
             if gradient_list:
@@ -749,38 +957,42 @@ if __name__ == "__main__":
                 chosen = selected_gradient.get()
                 GRADIENT_START = gradients[chosen][0]
                 GRADIENT_END = gradients[chosen][1]
-                l.info(f"Main: gradient selected: {chosen} ({GRADIENT_START} -> {GRADIENT_END})")
+                l.info(f"Main: Gradient selected: {chosen} ({GRADIENT_START} -> {GRADIENT_END})")
                 
                 root.destroy()
     except Exception as e:
-        l.debug(f"Main: dialog setup failed: {e}")
-        l.exception(f"Main: full exception: {e}")
-        pid_input = ""
+        l.debug(f"Main: Dialog setup failed: {e}")
+        l.exception(f"Main: Full exception during dialog setup: {e}")
 
-    if pid_input:
-        try:
-            SELECT_PID = int(pid_input)
-            l.info(f"Main: restricting media lookup to PID {SELECT_PID}")
-        except ValueError:
-            l.warning(
-                f"Main: invalid PID entered '{pid_input}', continuing without PID filter"
-            )
-            SELECT_PID = None
-
-    q = queue.Queue()
-    audio_thread = AudioCapture(q)
+    # Two queues for inter-thread communication:
+    # 1. Audio data
+    # 2. Media info (title, artist, is_ad)
+    audio_q = queue.Queue()
+    media_q = queue.Queue()
+    
+    # Start audio capture thread
+    audio_thread = AudioCapture(audio_q)
+    # Start Spotify/Gemini media info thread
+    media_thread = SpotifyMediaCapture(media_q)
+    
     try:
-        l.info("Main: starting audio thread")
+        l.info("Main: Starting audio thread.")
         audio_thread.start()
+        l.info("Main: Starting Spotify media thread.")
+        media_thread.start()
 
-        app = Visualizer(q)
-        l.info("Main: starting GUI mainloop")
+        app = Visualizer(audio_q, media_q)
+        l.info("Main: Starting GUI mainloop.")
         app.mainloop()
     except Exception as e:
-        l.exception(f"Main: unhandled exception: {e}")
+        l.exception(f"Main: Unhandled exception: {e}")
     finally:
-        l.info("Main: stopping audio thread")
+        l.info("Main: Stopping audio thread.")
         audio_thread.stop()
-        # Give the thread a moment to exit cleanly
         audio_thread.join(timeout=1.0)
-        l.info("Main: exiting")
+        
+        l.info("Main: Stopping Spotify media thread.")
+        media_thread.stop()
+        media_thread.join(timeout=1.0)
+        
+        l.info("Main: Exiting application.")
