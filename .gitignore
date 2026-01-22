@@ -1,14 +1,77 @@
-# Python-generated files
+# --- Python-spezifisch ---
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 wheels/
-*.egg-info
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Virtual environments
+# --- Virtuelle Umgebungen ---
+.venv/
+venv/
+ENV/
+env/
+# Falls du poetry oder pipenv nutzt:
 .venv
+bin/
+include/
+lib/
 
-# Logs
-logs/
+# --- Logs & Datenbanken ---
 *.log
+logs/
+*.sqlite3
+*.db
+
+# --- Sicherheit & Secrets (Wichtig!) ---
+.env
+.envrc
+spotify_token.json
+.secret
+*.pem
+*.key
+
+# --- Testing & Coverage ---
+htmlcov/
+.tox/
+.nosetests
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+
+# --- IDEs & Editoren ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+
+# --- Betriebssysteme ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Sonstiges ---
+*.cmd
