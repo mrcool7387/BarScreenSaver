@@ -26,16 +26,9 @@ import _template
 # CONFIG
 # -----------------------
 if not os.path.exists("config.json"):
-    default_config = {
-        "bar_count": 32,
-        "bar_color": "#66CCFF",
-        "background_color": "#111111",
-        "mirror_bars": True,
-        "update_rate": 30,
-        "show_clock": True,
-    }
+    default = '{"bar_count":100,"smoothing":0.8,"bar_color":"#FFA500","background_color":"#111111","mirror_bars":true,"gradient":true,"gradient_premaide":true,"gradient_slices":8,"gradient_start":"#A00000","gradient_end":"#0000FF","gradient_dynamic":true,"gradient_speed":2,"gradients":{"spring":["#FFB347","#87CEEB"],"summer":["#FFD700","#FF6347"],"autumn":["#FF8C00","#DC143C"],"winter":["#87CEEB","#FFFFFF"],"spring_fade":["#FFB347","#FF6B35"],"summer_night":["#FFD700","#4B0082"],"autumn_dusk":["#FF8C00","#8B0000"],"winter_snow":["#87CEEB","#B0E0E6"],"desert_sunset":["#EDC9AF","#C2B280"],"forest_mist":["#228B22","#ADFF2F"],"ocean_wave":["#1E90FF","#00BFFF"],"city_lights":["#FFD700","#FF4500"],"night_sky":["#000080","#191970"],"pastel_dream":["#FFB6C1","#FF69B4"],"simple_red":["#FF0000","#FF7F7F"],"simple_green":["#00FF00","#7FFF7F"],"simple_blue":["#0000FF","#7F7FFF"],"simple_yellow":["#FFFF00","#FFFF7F"],"simple_cyan":["#00FFFF","#7FFFFF"],"simple_magenta":["#FF00FF","#FF7FFF"],"simple_orange":["#FFA500","#FFD580"],"simple_purple":["#800080","#DDA0DD"],"simple_brown":["#A52A2A","#D2B48C"],"simple_gray":["#808080","#D3D3D3"],"red_blue":["#A00000","#0000FF"],"red_purpleblue":["#FF0000","#3C0080"]},"update_rate":60,"show_clock":true}'
     with open("config.json", "w") as f:
-        json.dump(default_config, f, indent=4)
+        json.dump(default, f, indent=4)
 
 with open("config.json", "r") as f:
     CONFIG = json.load(f)
@@ -54,10 +47,6 @@ GRADIENT_SLICES = CONFIG.get("gradient_slices", 8)
 DYNAMIC_GRADIENT = CONFIG.get("gradient_dynamic", False)
 GRADIENT_SPEED = CONFIG.get("gradient_speed", 2.0)
 
-# Optional: restrict media-title lookup to a specific process id (pid)
-# SELECT_PID is now obsolete
-SELECT_PID = None
-
 l = _template.LOGGER
 l.info(f"Configuration loaded: {CONFIG}")
 
@@ -66,8 +55,8 @@ l.info(f"Configuration loaded: {CONFIG}")
 # 🛠️ SPOTIFY/GEMINI CONFIGURATION
 # ---------------------------------------------------------
 # NOTE: Replace these with your actual credentials
-CLIENT_ID = "SPOTIFY_APP_CLIENT_ID"
-CLIENT_SECRET = "SPOTIFY_APP_CLIENT_SECRET"
+CLIENT_ID = "c34e289a8831477cbd8d47458e583afc"
+CLIENT_SECRET = "4daed514ad234bdfac9b5be783df701e"
 REDIRECT_URI = "http://127.0.0.1:8080/callback"
 TOKEN_FILE = "spotify_token.json"
 

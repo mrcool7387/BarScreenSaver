@@ -10,6 +10,7 @@ dependencies = [
     "isort>=7.0.0",
     "numpy>=2.2.6",
     "pycaw>=20251023",
+    "pyinstaller>=6.18.0",
     "pywin32>=311",
     "requests>=2.32.5",
     "rich>=14.2.0",
